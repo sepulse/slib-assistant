@@ -24,6 +24,23 @@ S-Lib kekal sebagai sistem rekod rasmi.
 - Autofill hanya jika window/form S-Lib yang betul telah disahkan.
 - Operator manusia kekal sebagai checkpoint akhir.
 
+## Kemas kini aplikasi
+
+Mulai versi 0.2.0, Windows bundle mengandungi \`SLibUpdater.exe\`.
+
+- Repo dan binary release rasmi berada di GitHub.
+- Aplikasi boleh semak release stabil baharu secara automatik ketika startup.
+- User boleh semak manual melalui **Bantuan → Semak Kemas Kini**.
+- Update hanya dimuat turun selepas release lengkap ditemui.
+- SHA256 package mesti sepadan sebelum pemasangan.
+- \`SLibUpdater.exe\` menunggu aplikasi ditutup, membuat backup \`.bak\`, kemudian
+  menggantikan \`SLibAssistant.exe\` sahaja.
+- Jika pemasangan gagal, versi sebelumnya dikekalkan/rollback.
+- Updater tidak menyentuh S-Lib, MDB, atau config/cache pengguna.
+
+\`SLibUpdater.exe\` mesti berada dalam folder yang sama dengan
+\`SLibAssistant.exe\`.
+
 ## Cara guna repo ini dengan Chat On Steroids
 
 1. Baca `GOAL.md`.
@@ -52,12 +69,12 @@ S-Lib kekal sebagai sistem rekod rasmi.
 - `docs/TEST_AND_ACCEPTANCE.md`
 - `docs/DECISIONS_AND_RISKS.md`
 
-## Status awal
+## Status semasa
 
 **Phase:** PRE-OFFICE RC  
 **Real S-Lib office control inspection:** belum dibuat  
 **Coding:** pre-office implementation siap  
 **Automated QA:** hijau  
-**Windows build:** SLibAssistant.exe + SLibProbe.exe  
+**Windows build:** SLibAssistant.exe + SLibUpdater.exe + SLibProbe.exe
 **MDB mutation:** dilarang untuk V1  
 **Auto-save:** dilarang untuk V1

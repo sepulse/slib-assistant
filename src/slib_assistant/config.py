@@ -21,6 +21,9 @@ marc_sru = false
 
 [logging]
 level = "INFO"
+
+[updates]
+check_on_startup = true
 """
 
 
@@ -45,6 +48,7 @@ class AppConfig:
         }
     )
     log_level: str = "INFO"
+    check_updates_on_startup: bool = True
     data_dir: Path = field(default_factory=default_data_dir)
 
 
@@ -72,4 +76,9 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         {key: bool(value) for key, value in payload.get("providers", {}).items()}
     )
     config.log_level = str(payload.get("logging", {}).get("level", config.log_level))
+    config.check_updates_on_startup = bool(
+        payload.get("updates", {}).get(
+            "check_on_startup", config.check_updates_on_startup
+        )
+    )
     return config

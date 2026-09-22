@@ -4,9 +4,11 @@ Set-Location $Root
 
 $App = ".\dist\SLibAssistant.exe"
 $Probe = ".\dist\SLibProbe.exe"
+$Updater = ".\dist\SLibUpdater.exe"
 
 if (-not (Test-Path $App)) { throw "Missing SLibAssistant.exe" }
 if (-not (Test-Path $Probe)) { throw "Missing SLibProbe.exe" }
+if (-not (Test-Path $Updater)) { throw "Missing SLibUpdater.exe" }
 
 $process = Start-Process -FilePath $App -WindowStyle Hidden -PassThru
 Start-Sleep -Milliseconds 2500
@@ -32,4 +34,5 @@ if (-not (Test-Path (Join-Path $probeOutput "probe.json"))) {
 
 Write-Output "SLibAssistant launch smoke: PASS"
 Write-Output "SLibProbe execution smoke: PASS (exit=$probeExit; 2 means target S-Lib window absent)"
-Get-ChildItem $App, $Probe | Select-Object Name, Length, LastWriteTime
+Write-Output "SLibUpdater packaging presence: PASS"
+Get-ChildItem $App, $Probe, $Updater | Select-Object Name, Length, LastWriteTime

@@ -13,3 +13,6 @@ marc_sru = false
 
 [logging]
 level = "INFO"
+
+[updates]
+check_on_startup = true

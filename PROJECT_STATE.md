@@ -15,6 +15,8 @@
 - PC office cannot currently be controlled through Chat On Steroids
 - Real S-Lib control tree has not yet been captured
 - Windows executables build successfully on Python 3.11 / Windows 10
+- GitHub repository is public for source and release distribution
+- Safe self-update path is implemented through public GitHub Releases
 - Open Library live lookup succeeds with the current Search API
 - Google Books provider is implemented and failure-isolated; the current network returned HTTP 429 during live smoke
 
@@ -47,6 +49,10 @@ dependency.
 - automated unit/integration/guardrail suite
 - PyInstaller Windows builds
 - pre-office QA evidence
+- tooltip/help affordances for primary UI actions
+- startup/manual update check
+- SHA256-verified update package download
+- external updater with backup/rollback
 
 ## Pending
 

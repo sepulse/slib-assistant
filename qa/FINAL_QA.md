@@ -2,8 +2,8 @@
 
 ## Build
 
-Version: 0.1.0 PRE-OFFICE RC
-Commit: N/A - starter folder is not initialized as a Git repository
+Version: 0.2.0 PRE-OFFICE RC
+Commit: release commit tagged v0.2.0
 Date: 2026-09-22
 
 ## Gates
@@ -22,7 +22,10 @@ Date: 2026-09-22
 ### Unit
 
 PASS. ISBN validation/conversion, resolver, provider normalization/error handling,
-cache, config safety, field mapper, and mock S-Lib adapter are covered.
+cache, config safety, field mapper, mock S-Lib adapter, update release parsing,
+checksum validation, and updater replacement/rollback paths are covered.
+
+Automated suite: **36 passed**.
 
 ### Integration
 
@@ -51,6 +54,9 @@ PASS. Automated checks cover:
 - empty-value skip;
 - abort;
 - editable-control content redaction in the probe.
+- update package SHA256 verification;
+- updater target restriction to \`SLibAssistant.exe\`;
+- updater backup before replacement.
 
 ## Provider evidence
 
@@ -68,6 +74,9 @@ that another provider can still resolve the book.
 - Keyboard fallback tab order remains deliberately unconfigured.
 - Dropdown mappings remain pending office evidence.
 - No claim of real S-Lib autofill compatibility is made yet.
+- Version 0.1.0 requires one manual move to the 0.2.0 bundle because 0.1.0 did
+  not yet contain \`SLibUpdater.exe\`; subsequent stable releases can use the
+  in-app update path.
 
 ## Final status
 

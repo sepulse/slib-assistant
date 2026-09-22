@@ -15,4 +15,7 @@ if ($LASTEXITCODE -ne 0) { throw "SLibAssistant build failed with exit code $LAS
 python -m PyInstaller --noconfirm --clean --onefile --console --name SLibProbe --paths src --hidden-import pywinauto --hidden-import pywinauto.application src\slib_assistant\slib\probe.py
 if ($LASTEXITCODE -ne 0) { throw "SLibProbe build failed with exit code $LASTEXITCODE" }
 
-Get-ChildItem ".\dist\SLibAssistant.exe", ".\dist\SLibProbe.exe" | Select-Object Name, Length, LastWriteTime
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name SLibUpdater --paths src src\slib_assistant\updater.py
+if ($LASTEXITCODE -ne 0) { throw "SLibUpdater build failed with exit code $LASTEXITCODE" }
+
+Get-ChildItem ".\dist\SLibAssistant.exe", ".\dist\SLibProbe.exe", ".\dist\SLibUpdater.exe" | Select-Object Name, Length, LastWriteTime

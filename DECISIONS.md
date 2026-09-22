@@ -77,3 +77,17 @@ not used as the primary path.
 Provider HTTP errors, rate limits, malformed responses, and not-found results are
 isolated per provider. A failed provider does not invalidate successful results
 from another provider.
+
+## D-014 — Public release and self-update
+
+The repository is public. Stable Windows updates are distributed through public
+GitHub Releases so the application does not embed a GitHub credential.
+
+The application checks only the latest non-draft, non-prerelease semantic
+version release. The release must contain both \`SLibAssistant-Windows.zip\` and
+\`SLibAssistant-Windows.zip.sha256\`.
+
+The package checksum is verified before installation. \`SLibUpdater.exe\` runs
+outside the main process, waits for the app to exit, backs up the current
+\`SLibAssistant.exe\`, replaces only that executable, and relaunches it. User
+config/cache and all S-Lib files remain outside the updater's mutation scope.
