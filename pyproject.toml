@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slib-assistant"
+version = "0.1.0"
+description = "Safe Windows companion utility for ISBN metadata lookup and S-Lib V1001r6 autofill."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+windows = ["pywinauto>=0.6.8"]
+dev = ["pytest>=8.0", "pyinstaller>=6.0"]
+
+[project.scripts]
+slib-assistant = "slib_assistant.app:main"
+slib-probe = "slib_assistant.slib.probe:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

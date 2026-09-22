@@ -1,0 +1,15 @@
+[slib]
+window_title = "Kemaskini Bahan"
+auto_save = false
+
+[lookup]
+timeout_seconds = 5
+cache_ttl_days = 30
+
+[providers]
+google_books = true
+open_library = true
+marc_sru = false
+
+[logging]
+level = "INFO"
