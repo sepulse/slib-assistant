@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import queue
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -9,6 +10,7 @@ from slib_assistant import __version__
 from slib_assistant.app import MetadataService
 from slib_assistant.config import AppConfig
 from slib_assistant.models import AppState, BookMetadata
+from slib_assistant.scanner import ScannerRouter
 from slib_assistant.update import (
     UpdateError,
     UpdateInfo,
@@ -95,10 +97,15 @@ class AssistantWindow:
         self.state = AppState.IDLE
         self.entries: dict[str, tk.Entry] = {}
         self.status_vars: dict[str, tk.StringVar] = {}
+        self.scanner_router: ScannerRouter | None = None
+        self.scanner_events: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
+        self._closing = False
         self.root.title("S-Lib Assistant")
         self.root.geometry("760x690")
         self.root.minsize(680, 560)
         self._build()
+        self._start_scanner_router()
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
         if self.config.check_updates_on_startup:
             self.root.after(1200, lambda: self.check_updates(manual=False))
 
@@ -117,11 +124,11 @@ class AssistantWindow:
         top.pack(fill="x")
         ttk.Label(top, text="ISBN").pack(side="left")
         self.isbn_var = tk.StringVar()
-        isbn_entry = ttk.Entry(top, textvariable=self.isbn_var, width=28)
-        isbn_entry.pack(side="left", padx=(8, 8))
-        isbn_entry.bind("<Return>", lambda _event: self.lookup())
+        self.isbn_entry = ttk.Entry(top, textvariable=self.isbn_var, width=28)
+        self.isbn_entry.pack(side="left", padx=(8, 8))
+        self.isbn_entry.bind("<Return>", lambda _event: self.lookup())
         ToolTip(
-            isbn_entry,
+            self.isbn_entry,
             "Imbas barcode ISBN atau taip ISBN-10/ISBN-13, kemudian tekan Enter.",
         )
         search_button = ttk.Button(top, text="Cari", command=self.lookup)
@@ -134,6 +141,19 @@ class AssistantWindow:
         ToolTip(
             refresh_button,
             "Abaikan cache tempatan dan cari semula metadata daripada provider.",
+        )
+        self.scanner_enabled = tk.BooleanVar(value=True)
+        scanner_toggle = ttk.Checkbutton(
+            top,
+            text="Scanner Mode",
+            variable=self.scanner_enabled,
+            command=self._toggle_scanner_mode,
+        )
+        scanner_toggle.pack(side="left", padx=(4, 6))
+        ToolTip(
+            scanner_toggle,
+            "Bila aktif, scan ISBN pada medan ISBN/ISSN S-Lib dialihkan terus "
+            "ke Assistant tanpa Scanner Guard berasingan.",
         )
         self.overall_status = tk.StringVar(value="Sedia")
         ttk.Label(top, textvariable=self.overall_status).pack(side="right")
@@ -181,7 +201,61 @@ class AssistantWindow:
         ttk.Label(bottom, text="S-Lib mapping: pending office verification").pack(
             side="right", padx=12
         )
-        isbn_entry.focus_set()
+        self.isbn_entry.focus_set()
+
+    def _start_scanner_router(self) -> None:
+        self.scanner_router = ScannerRouter(
+            on_scan=lambda isbn: self.scanner_events.put(("scan", isbn)),
+            on_status=lambda status: self.scanner_events.put(("status", status)),
+        )
+        started = self.scanner_router.start()
+        if not started:
+            self.scanner_enabled.set(False)
+        self.root.after(50, self._poll_scanner_events)
+
+    def _poll_scanner_events(self) -> None:
+        if self._closing:
+            return
+        while True:
+            try:
+                kind, value = self.scanner_events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "scan":
+                self._receive_scanned_isbn(value)
+            else:
+                self._scanner_status(value)
+        self.root.after(50, self._poll_scanner_events)
+
+    def _scanner_status(self, status: str) -> None:
+        logging.info("Scanner: %s", status)
+        lowered = status.casefold()
+        if "gagal" in lowered or "fail-open" in lowered:
+            self.overall_status.set(status)
+
+    def _toggle_scanner_mode(self) -> None:
+        if self.scanner_router is None:
+            self.scanner_enabled.set(False)
+            return
+        enabled = self.scanner_enabled.get()
+        self.scanner_router.set_enabled(enabled)
+        self.overall_status.set("Scanner Mode aktif" if enabled else "Scanner Mode dimatikan")
+
+    def _receive_scanned_isbn(self, isbn: str) -> None:
+        """Receive a scan directly from the in-process Windows scanner router."""
+        if not self.scanner_enabled.get():
+            return
+        self.root.deiconify()
+        self.root.lift()
+        try:
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+        self.isbn_var.set(isbn)
+        self.isbn_entry.icursor("end")
+        self.isbn_entry.focus_set()
+        self.overall_status.set(f"ISBN scanner diterima: {isbn}")
+        self.root.after(80, self.lookup)
 
     def show_about(self) -> None:
         messagebox.showinfo(
@@ -285,6 +359,8 @@ class AssistantWindow:
             return
         self.overall_status.set("Mencari...")
         self.state = AppState.LOOKING_UP
+        if self.scanner_router is not None:
+            self.scanner_router.set_enabled(False)
         threading.Thread(
             target=self._lookup_thread, args=(raw, force), daemon=True
         ).start()
@@ -300,6 +376,8 @@ class AssistantWindow:
     def _show_error(self, message: str) -> None:
         self.overall_status.set("Ralat")
         self.state = AppState.ERROR
+        if self.scanner_router is not None:
+            self.scanner_router.set_enabled(self.scanner_enabled.get())
         messagebox.showerror("S-Lib Assistant", message)
 
     def _render(self, metadata: BookMetadata) -> None:
@@ -333,6 +411,8 @@ class AssistantWindow:
             )
         self.overall_status.set("Sedia untuk semakan")
         self.state = AppState.READY_TO_FILL
+        if self.scanner_router is not None:
+            self.scanner_router.set_enabled(self.scanner_enabled.get())
 
     def _apply_edits(self) -> None:
         if self.metadata is None:
@@ -368,6 +448,15 @@ class AssistantWindow:
         for status in self.status_vars.values():
             status.set("MISSING")
         self.source_text.delete("1.0", "end")
+        if self.scanner_router is not None:
+            self.scanner_router.set_enabled(self.scanner_enabled.get())
+        self.isbn_entry.focus_set()
+
+    def close(self) -> None:
+        self._closing = True
+        if self.scanner_router is not None:
+            self.scanner_router.stop()
+        self.root.destroy()
 
 
 def run_ui(config: AppConfig, service: MetadataService) -> None:

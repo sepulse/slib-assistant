@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slib-assistant"
-version = "0.2.0"
+version = "0.3.2"
 description = "Safe Windows companion utility for ISBN metadata lookup and S-Lib V1001r6 autofill."
 requires-python = ">=3.11"
 dependencies = []
