@@ -4,7 +4,7 @@ import time
 import pytest
 
 import slib_assistant.scanner as scanner
-from slib_assistant.scanner import appended_scan_matches, clean_scan, valid_scanned_isbn
+from slib_assistant.scanner import DeviceBuffer, clean_scan, valid_scanned_isbn
 
 
 def test_clean_scan_accepts_common_barcode_formatting():
@@ -23,44 +23,29 @@ def test_invalid_checksum_is_not_routed():
     assert valid_scanned_isbn("9789836276965", 0.1) is None
 
 
-def test_appended_scan_must_match_exact_original_prefix():
-    assert appended_scan_matches("ABC9789836276964", "ABC", "9789836276964")
-    assert not appended_scan_matches("XYZ9789836276964", "ABC", "9789836276964")
-    assert not appended_scan_matches("ABC9789836276965", "ABC", "9789836276964")
+def test_device_buffer_finalizes_valid_isbn_after_idle():
+    state = DeviceBuffer()
+    started = 100.0
+    for index, char in enumerate("9789836276964"):
+        state.append(char, started + index * 0.01)
+    assert state.isbn(started + 0.30, require_idle=True) == "9789836276964"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows control polling behavior")
-def test_windows_backend_routes_stable_valid_isbn_without_keyboard_hook(monkeypatch):
-    routed: list[str] = []
-    backend = scanner._WindowsScannerBackend(
-        is_enabled=lambda: True,
-        on_scan=routed.append,
-        on_status=lambda _message: None,
-    )
-    monkeypatch.setattr(backend, "_focused_slib_isbn", lambda: 123)
-    monkeypatch.setattr(scanner, "_window_text", lambda _hwnd: "9789836276964")
-    backend._seen_focus = 123
-    backend._last_value = "9789836276964"
-    backend._stable_value = "9789836276964"
-    backend._stable_since = time.monotonic() - 1.0
-
-    backend._poll_once()
-
-    assert routed == ["9789836276964"]
-    assert backend._pending == (123, "9789836276964")
+def test_device_buffer_rejects_slow_human_entry():
+    state = DeviceBuffer()
+    for index, char in enumerate("9789836276964"):
+        state.append(char, index * 0.25)
+    assert state.isbn(3.2, require_idle=True) is None
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows control polling behavior")
-def test_windows_backend_acknowledge_is_fail_open_if_field_changed(monkeypatch):
+@pytest.mark.skipif(os.name != "nt", reason="Windows Raw Input behavior")
+def test_windows_raw_input_backend_can_start_and_stop():
     statuses: list[str] = []
     backend = scanner._WindowsScannerBackend(
         is_enabled=lambda: True,
         on_scan=lambda _isbn: None,
         on_status=statuses.append,
     )
-    backend._pending = (123, "9789836276964")
-    monkeypatch.setattr(scanner.user32, "IsWindow", lambda _hwnd: 1)
-    monkeypatch.setattr(scanner, "_window_text", lambda _hwnd: "9789836276965")
-
-    assert backend.acknowledge("9789836276964") is False
-    assert any("fail-open" in message for message in statuses)
+    assert backend.start() is True
+    assert any("Raw Input sedia" in message for message in statuses)
+    backend.stop()

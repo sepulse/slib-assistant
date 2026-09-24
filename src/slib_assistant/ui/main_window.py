@@ -241,7 +241,7 @@ class AssistantWindow:
         self.overall_status.set("Scanner Mode aktif" if enabled else "Scanner Mode dimatikan")
 
     def _receive_scanned_isbn(self, isbn: str) -> None:
-        """Receive a scan directly from the in-process Windows scanner router."""
+        """Receive a copy of a HID barcode scan while S-Lib keeps the original."""
         if not self.scanner_enabled.get():
             return
         self.root.deiconify()
@@ -253,15 +253,7 @@ class AssistantWindow:
         self.isbn_var.set(isbn)
         self.isbn_entry.icursor("end")
         self.isbn_entry.focus_set()
-        acknowledged = False
-        if self.scanner_router is not None:
-            acknowledged = self.scanner_router.acknowledge(isbn)
-        if acknowledged:
-            self.overall_status.set(f"ISBN scanner diterima: {isbn}")
-        else:
-            self.overall_status.set(
-                "ISBN diterima Assistant; salinan dikekalkan di S-Lib (fail-open)."
-            )
+        self.overall_status.set(f"ISBN scanner diterima: {isbn}")
         self.root.after(80, self.lookup)
 
     def show_about(self) -> None:

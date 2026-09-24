@@ -5,13 +5,13 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from slib_assistant.isbn import is_valid_isbn10, is_valid_isbn13
 
 
 SCAN_MAX_SECONDS = 2.0
-SLIB_ISBN_CONTROL_ID = 59
-SLIB_ISBN_CLASS = "ThunderRT6TextBox"
+SCAN_IDLE_SECONDS = 0.15
 
 
 def clean_scan(value: str) -> str:
@@ -20,7 +20,7 @@ def clean_scan(value: str) -> str:
 
 
 def valid_scanned_isbn(value: str, duration_seconds: float) -> str | None:
-    """Return a normalized ISBN when a sequence looks like a barcode scan."""
+    """Return an ISBN only when checksum and scanner-like timing both pass."""
     candidate = clean_scan(value)
     if duration_seconds < 0 or duration_seconds > SCAN_MAX_SECONDS:
         return None
@@ -31,25 +31,38 @@ def valid_scanned_isbn(value: str, duration_seconds: float) -> str | None:
     return None
 
 
-def appended_scan_matches(current: str, original: str, scanned: str) -> bool:
-    """Verify S-Lib still contains exactly the original value plus this scan."""
-    if not current.startswith(original):
-        return False
-    return clean_scan(current[len(original) :]) == clean_scan(scanned)
+@dataclass(slots=True)
+class DeviceBuffer:
+    chars: list[str] = field(default_factory=list)
+    started_at: float = 0.0
+    last_at: float = 0.0
+
+    def reset(self) -> None:
+        self.chars.clear()
+        self.started_at = 0.0
+        self.last_at = 0.0
+
+    def append(self, char: str, now: float) -> None:
+        if not self.chars:
+            self.started_at = now
+        self.last_at = now
+        self.chars.append(char)
+
+    def isbn(self, now: float, *, require_idle: bool) -> str | None:
+        if not self.chars:
+            return None
+        if require_idle and now - self.last_at < SCAN_IDLE_SECONDS:
+            return None
+        return valid_scanned_isbn("".join(self.chars), now - self.started_at)
 
 
 class ScannerRouter:
-    """Observe scanner input in S-Lib and route a confirmed ISBN internally.
+    """Observe HID keyboard scans using Windows Raw Input.
 
-    The important safety property is fail-open: number keys are never blocked.
-    S-Lib receives the barcode normally while it is being scanned. Only the
-    terminating Enter/Tab is suppressed, and only after we have successfully
-    restored the S-Lib ISBN field to its exact pre-scan value. If restoration
-    fails, the terminator is allowed through and the barcode remains in S-Lib.
-
-    The router runs inside S-Lib Assistant, so a successful scan is delivered
-    directly to the application's callback. It does not click coordinates,
-    synthesize keyboard input, or inject anything into the S-Lib process.
+    The router never blocks or rewrites keyboard input. S-Lib receives the scan
+    normally. In parallel, a valid fast ISBN seen while S-Lib is foreground is
+    copied directly into S-Lib Assistant. This is deliberately fail-open: if
+    Raw Input detection fails, normal S-Lib barcode entry remains unaffected.
     """
 
     def __init__(
@@ -97,73 +110,155 @@ class ScannerRouter:
         if backend is not None:
             backend.stop()
 
-    def acknowledge(self, isbn: str) -> bool:
-        """Confirm Assistant received an ISBN, then clear that exact value in S-Lib.
-
-        Until this acknowledgement succeeds, Scanner Mode leaves the barcode in
-        S-Lib. This makes routing fail-open instead of silently consuming input.
-        """
-        backend = self._backend
-        if backend is None:
-            return False
-        return backend.acknowledge(isbn)
-
 
 if os.name == "nt":
     import ctypes
     from ctypes import wintypes
 
-    WM_SETTEXT = 0x000C
-    SMTO_ABORTIFHUNG = 0x0002
+    WM_INPUT = 0x00FF
+    WM_TIMER = 0x0113
+    WM_DESTROY = 0x0002
+    WM_CLOSE = 0x0010
+    WM_KEYDOWN = 0x0100
+    WM_SYSKEYDOWN = 0x0104
+
+    RIM_TYPEKEYBOARD = 1
+    RID_INPUT = 0x10000003
+    RIDEV_INPUTSINK = 0x00000100
+    HID_USAGE_PAGE_GENERIC = 0x01
+    HID_USAGE_GENERIC_KEYBOARD = 0x06
+
+    VK_RETURN = 0x0D
+    VK_TAB = 0x09
+    VK_SHIFT = 0x10
+    VK_CONTROL = 0x11
+    VK_MENU = 0x12
+    VK_CAPITAL = 0x14
+    VK_NUMLOCK = 0x90
+
+    LRESULT = ctypes.c_ssize_t
     ULONG_PTR = wintypes.WPARAM
 
-    class GUITHREADINFO(ctypes.Structure):
+    class RAWINPUTDEVICE(ctypes.Structure):
         _fields_ = [
-            ("cbSize", wintypes.DWORD),
-            ("flags", wintypes.DWORD),
-            ("hwndActive", wintypes.HWND),
-            ("hwndFocus", wintypes.HWND),
-            ("hwndCapture", wintypes.HWND),
-            ("hwndMenuOwner", wintypes.HWND),
-            ("hwndMoveSize", wintypes.HWND),
-            ("hwndCaret", wintypes.HWND),
-            ("rcCaret", wintypes.RECT),
+            ("usUsagePage", wintypes.USHORT),
+            ("usUsage", wintypes.USHORT),
+            ("dwFlags", wintypes.DWORD),
+            ("hwndTarget", wintypes.HWND),
         ]
 
+    class RAWINPUTHEADER(ctypes.Structure):
+        _fields_ = [
+            ("dwType", wintypes.DWORD),
+            ("dwSize", wintypes.DWORD),
+            ("hDevice", wintypes.HANDLE),
+            ("wParam", wintypes.WPARAM),
+        ]
+
+    class RAWKEYBOARD(ctypes.Structure):
+        _fields_ = [
+            ("MakeCode", wintypes.USHORT),
+            ("Flags", wintypes.USHORT),
+            ("Reserved", wintypes.USHORT),
+            ("VKey", wintypes.USHORT),
+            ("Message", wintypes.UINT),
+            ("ExtraInformation", wintypes.ULONG),
+        ]
+
+    class RAWINPUTUNION(ctypes.Union):
+        _fields_ = [("keyboard", RAWKEYBOARD)]
+
+    class RAWINPUT(ctypes.Structure):
+        _anonymous_ = ("data",)
+        _fields_ = [("header", RAWINPUTHEADER), ("data", RAWINPUTUNION)]
+
+    class WNDCLASSW(ctypes.Structure):
+        _fields_ = [
+            ("style", wintypes.UINT),
+            ("lpfnWndProc", ctypes.c_void_p),
+            ("cbClsExtra", ctypes.c_int),
+            ("cbWndExtra", ctypes.c_int),
+            ("hInstance", wintypes.HINSTANCE),
+            ("hIcon", wintypes.HICON),
+            ("hCursor", wintypes.HANDLE),
+            ("hbrBackground", wintypes.HBRUSH),
+            ("lpszMenuName", wintypes.LPCWSTR),
+            ("lpszClassName", wintypes.LPCWSTR),
+        ]
+
+    WNDPROC = ctypes.WINFUNCTYPE(
+        LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+    )
+
     user32 = ctypes.WinDLL("user32", use_last_error=True)
-    user32.GetForegroundWindow.restype = wintypes.HWND
-    user32.GetWindowThreadProcessId.argtypes = [
-        wintypes.HWND,
-        ctypes.POINTER(wintypes.DWORD),
-    ]
-    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-    user32.GetGUIThreadInfo.argtypes = [
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
+    user32.RegisterClassW.restype = wintypes.ATOM
+    user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+    user32.UnregisterClassW.restype = wintypes.BOOL
+    user32.CreateWindowExW.argtypes = [
         wintypes.DWORD,
-        ctypes.POINTER(GUITHREADINFO),
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.HWND,
+        wintypes.HMENU,
+        wintypes.HINSTANCE,
+        wintypes.LPVOID,
     ]
-    user32.GetGUIThreadInfo.restype = wintypes.BOOL
-    user32.GetDlgCtrlID.argtypes = [wintypes.HWND]
-    user32.GetDlgCtrlID.restype = ctypes.c_int
-    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-    user32.GetWindowTextLengthW.restype = ctypes.c_int
-    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-    user32.GetWindowTextW.restype = ctypes.c_int
-    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-    user32.GetClassNameW.restype = ctypes.c_int
-    user32.IsWindow.argtypes = [wintypes.HWND]
-    user32.IsWindow.restype = wintypes.BOOL
-    user32.IsWindowVisible.argtypes = [wintypes.HWND]
-    user32.IsWindowVisible.restype = wintypes.BOOL
-    user32.SendMessageTimeoutW.argtypes = [
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.DestroyWindow.argtypes = [wintypes.HWND]
+    user32.DestroyWindow.restype = wintypes.BOOL
+    user32.DefWindowProcW.argtypes = [
         wintypes.HWND,
         wintypes.UINT,
         wintypes.WPARAM,
         wintypes.LPARAM,
-        wintypes.UINT,
-        wintypes.UINT,
-        ctypes.POINTER(ULONG_PTR),
     ]
-    user32.SendMessageTimeoutW.restype = wintypes.LPARAM
+    user32.DefWindowProcW.restype = LRESULT
+    user32.GetMessageW.argtypes = [
+        ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT
+    ]
+    user32.GetMessageW.restype = wintypes.BOOL
+    user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+    user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+    user32.PostMessageW.argtypes = [
+        wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+    ]
+    user32.PostMessageW.restype = wintypes.BOOL
+    user32.PostQuitMessage.argtypes = [ctypes.c_int]
+    user32.SetTimer.argtypes = [
+        wintypes.HWND, ULONG_PTR, wintypes.UINT, wintypes.LPVOID
+    ]
+    user32.SetTimer.restype = ULONG_PTR
+    user32.KillTimer.argtypes = [wintypes.HWND, ULONG_PTR]
+    user32.KillTimer.restype = wintypes.BOOL
+    user32.RegisterRawInputDevices.argtypes = [
+        ctypes.POINTER(RAWINPUTDEVICE), wintypes.UINT, wintypes.UINT
+    ]
+    user32.RegisterRawInputDevices.restype = wintypes.BOOL
+    user32.GetRawInputData.argtypes = [
+        wintypes.HANDLE,
+        wintypes.UINT,
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.UINT),
+        wintypes.UINT,
+    ]
+    user32.GetRawInputData.restype = wintypes.UINT
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+    TIMER_ID = 1
 
 
     def _window_text(hwnd: int) -> str:
@@ -173,24 +268,27 @@ if os.name == "nt":
         return buffer.value
 
 
-    def _class_name(hwnd: int) -> str:
-        buffer = ctypes.create_unicode_buffer(256)
-        user32.GetClassNameW(hwnd, buffer, len(buffer))
-        return buffer.value
+    def _foreground_is_slib() -> bool:
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        title = _window_text(hwnd).casefold()
+        return "s-lib v1001" in title or "kemaskini bahan" in title
 
 
-    def _isbn_from_field(value: str) -> str | None:
-        candidate = clean_scan(value)
-        if len(candidate) == 10 and is_valid_isbn10(candidate):
-            return candidate
-        if len(candidate) == 13 and is_valid_isbn13(candidate):
-            return candidate
+    def _candidate_char(vk: int) -> str | None:
+        if 0x30 <= vk <= 0x39:
+            return chr(ord("0") + vk - 0x30)
+        if 0x60 <= vk <= 0x69:
+            return chr(ord("0") + vk - 0x60)
+        if vk == 0x58:
+            return "X"
+        if vk in (0xBD, 0x6D):
+            return "-"
         return None
 
 
     class _WindowsScannerBackend:
-        """Poll the real S-Lib ISBN textbox; never intercept keyboard input."""
-
         def __init__(
             self,
             is_enabled: Callable[[], bool],
@@ -201,72 +299,32 @@ if os.name == "nt":
             self._on_scan = on_scan
             self._on_status = on_status
             self._thread: threading.Thread | None = None
-            self._stop = threading.Event()
-            self._pending: tuple[int, str] | None = None
-            self._seen_focus: int | None = None
-            self._last_value = ""
-            self._stable_value = ""
-            self._stable_since = 0.0
+            self._ready = threading.Event()
+            self._start_ok = False
+            self._hwnd: int | None = None
+            self._instance = kernel32.GetModuleHandleW(None)
+            self._class_name = f"SLibAssistantRawInput_{os.getpid()}_{id(self)}"
+            self._wndproc = WNDPROC(self._window_proc)
+            self._buffers: dict[int, DeviceBuffer] = {}
             self._last_status = ""
 
         def start(self) -> bool:
             self._thread = threading.Thread(
-                target=self._run,
-                name="SLibScannerMonitor",
-                daemon=True,
+                target=self._run, name="SLibRawInputReceiver", daemon=True
             )
             self._thread.start()
-            self._emit_status(
-                "Scanner Mode aktif — menunggu medan ISBN/ISSN S-Lib."
-            )
-            return True
+            if not self._ready.wait(timeout=2.0):
+                self._emit_status("Scanner Mode gagal dimulakan (Raw Input timeout).")
+                return False
+            return self._start_ok
 
         def stop(self) -> None:
-            self._stop.set()
+            hwnd = self._hwnd
+            if hwnd:
+                user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
             thread = self._thread
             if thread is not None and thread.is_alive():
                 thread.join(timeout=1.0)
-
-        def acknowledge(self, isbn: str) -> bool:
-            pending = self._pending
-            if pending is None:
-                return False
-            hwnd, expected = pending
-            if expected != isbn or not user32.IsWindow(hwnd):
-                return False
-            current = _window_text(hwnd)
-            if clean_scan(current) != clean_scan(expected):
-                self._emit_status(
-                    "Scanner Mode fail-open: ISBN dikekalkan di S-Lib kerana "
-                    "nilai medan telah berubah sebelum pengesahan."
-                )
-                self._pending = None
-                return False
-            empty = ctypes.create_unicode_buffer("")
-            result = ULONG_PTR()
-            sent = user32.SendMessageTimeoutW(
-                hwnd,
-                WM_SETTEXT,
-                0,
-                ctypes.cast(empty, ctypes.c_void_p).value,
-                SMTO_ABORTIFHUNG,
-                300,
-                ctypes.byref(result),
-            )
-            if not sent or _window_text(hwnd) != "":
-                self._emit_status(
-                    "Scanner Mode fail-open: ISBN sudah diterima Assistant tetapi "
-                    "tidak dapat dibersihkan dari S-Lib."
-                )
-                self._pending = None
-                return False
-            self._pending = None
-            self._seen_focus = hwnd
-            self._last_value = ""
-            self._stable_value = ""
-            self._stable_since = time.monotonic()
-            self._emit_status("Scanner Mode: ISBN diterima oleh Assistant.")
-            return True
 
         def _emit_status(self, message: str) -> None:
             if message == self._last_status:
@@ -274,70 +332,147 @@ if os.name == "nt":
             self._last_status = message
             self._on_status(message)
 
-        def _focused_slib_isbn(self) -> int | None:
-            top = user32.GetForegroundWindow()
-            if not top:
-                return None
-            title = _window_text(top).casefold()
-            if "s-lib v1001" not in title and "kemaskini bahan" not in title:
-                return None
-            thread_id = user32.GetWindowThreadProcessId(top, None)
-            if not thread_id:
-                return None
-            info = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
-            if not user32.GetGUIThreadInfo(thread_id, ctypes.byref(info)):
-                return None
-            focus = info.hwndFocus
-            if not focus or not user32.IsWindowVisible(focus):
-                return None
-            if user32.GetDlgCtrlID(focus) != SLIB_ISBN_CONTROL_ID:
-                return None
-            if _class_name(focus).casefold() != SLIB_ISBN_CLASS.casefold():
-                return None
-            return int(focus)
-
         def _run(self) -> None:
-            while not self._stop.wait(0.03):
-                if not self._is_enabled() or self._pending is not None:
-                    continue
-                self._poll_once()
+            wc = WNDCLASSW()
+            wc.lpfnWndProc = ctypes.cast(self._wndproc, ctypes.c_void_p).value
+            wc.hInstance = self._instance
+            wc.lpszClassName = self._class_name
+            if not user32.RegisterClassW(ctypes.byref(wc)):
+                self._emit_status(
+                    f"Scanner Mode gagal daftar Raw Input ({ctypes.get_last_error()})."
+                )
+                self._ready.set()
+                return
+            try:
+                hwnd = user32.CreateWindowExW(
+                    0,
+                    self._class_name,
+                    "SLibAssistantRawInput",
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    self._instance,
+                    None,
+                )
+                if not hwnd:
+                    self._emit_status(
+                        f"Scanner Mode gagal cipta Raw Input window ({ctypes.get_last_error()})."
+                    )
+                    self._ready.set()
+                    return
+                self._hwnd = int(hwnd)
+                device = RAWINPUTDEVICE(
+                    HID_USAGE_PAGE_GENERIC,
+                    HID_USAGE_GENERIC_KEYBOARD,
+                    RIDEV_INPUTSINK,
+                    hwnd,
+                )
+                if not user32.RegisterRawInputDevices(
+                    ctypes.byref(device), 1, ctypes.sizeof(RAWINPUTDEVICE)
+                ):
+                    self._emit_status(
+                        f"Scanner Mode gagal daftar keyboard Raw Input ({ctypes.get_last_error()})."
+                    )
+                    self._ready.set()
+                    user32.DestroyWindow(hwnd)
+                    return
+                user32.SetTimer(hwnd, TIMER_ID, 50, None)
+                self._start_ok = True
+                self._ready.set()
+                self._emit_status(
+                    "Scanner Mode aktif — Raw Input sedia. Scan ISBN dalam S-Lib."
+                )
+                message = wintypes.MSG()
+                while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
+                    user32.TranslateMessage(ctypes.byref(message))
+                    user32.DispatchMessageW(ctypes.byref(message))
+            finally:
+                self._hwnd = None
+                user32.UnregisterClassW(self._class_name, self._instance)
 
-        def _poll_once(self) -> None:
-            focus = self._focused_slib_isbn()
-            if focus is None:
-                return
-            if focus != self._seen_focus:
-                self._seen_focus = focus
-                self._last_value = _window_text(focus)
-                self._stable_value = self._last_value
-                self._stable_since = time.monotonic()
-                self._emit_status("Scanner Mode: medan ISBN/ISSN S-Lib dikesan.")
-                return
+        def _window_proc(self, hwnd: int, message: int, wparam: int, lparam: int) -> int:
+            if message == WM_INPUT:
+                self._handle_raw_input(lparam)
+                return 0
+            if message == WM_TIMER and wparam == TIMER_ID:
+                self._flush_idle_buffers()
+                return 0
+            if message == WM_CLOSE:
+                user32.KillTimer(hwnd, TIMER_ID)
+                user32.DestroyWindow(hwnd)
+                return 0
+            if message == WM_DESTROY:
+                user32.PostQuitMessage(0)
+                return 0
+            return user32.DefWindowProcW(hwnd, message, wparam, lparam)
 
-            value = _window_text(focus)
-            if value != self._last_value:
-                self._last_value = value
-                self._stable_value = value
-                self._stable_since = time.monotonic()
+        def _handle_raw_input(self, raw_handle: int) -> None:
+            size = wintypes.UINT(0)
+            header_size = ctypes.sizeof(RAWINPUTHEADER)
+            result = user32.GetRawInputData(
+                raw_handle, RID_INPUT, None, ctypes.byref(size), header_size
+            )
+            if result == 0xFFFFFFFF or size.value < ctypes.sizeof(RAWINPUT):
                 return
+            buffer = ctypes.create_string_buffer(size.value)
+            result = user32.GetRawInputData(
+                raw_handle, RID_INPUT, buffer, ctypes.byref(size), header_size
+            )
+            if result == 0xFFFFFFFF:
+                return
+            raw = ctypes.cast(buffer, ctypes.POINTER(RAWINPUT)).contents
+            if raw.header.dwType != RIM_TYPEKEYBOARD:
+                return
+            keyboard = raw.keyboard
+            if keyboard.Message not in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                return
+            if not self._is_enabled() or not _foreground_is_slib():
+                return
+            device = int(ctypes.cast(raw.header.hDevice, ctypes.c_void_p).value or 0)
+            state = self._buffers.setdefault(device, DeviceBuffer())
+            now = time.monotonic()
+            vk = int(keyboard.VKey)
+            char = _candidate_char(vk)
+            if char is not None:
+                if state.chars and now - state.last_at > SCAN_IDLE_SECONDS * 3:
+                    state.reset()
+                state.append(char, now)
+                return
+            if vk in (VK_SHIFT, VK_CONTROL, VK_MENU, VK_CAPITAL, VK_NUMLOCK):
+                return
+            if vk in (VK_RETURN, VK_TAB):
+                self._finalize(device, now, require_idle=False)
+                return
+            state.reset()
 
-            if not value or time.monotonic() - self._stable_since < 0.09:
+        def _flush_idle_buffers(self) -> None:
+            if not self._is_enabled() or not _foreground_is_slib():
                 return
-            isbn = _isbn_from_field(value)
+            now = time.monotonic()
+            for device in list(self._buffers):
+                self._finalize(device, now, require_idle=True)
+
+        def _finalize(self, device: int, now: float, *, require_idle: bool) -> None:
+            state = self._buffers.get(device)
+            if state is None:
+                return
+            isbn = state.isbn(now, require_idle=require_idle)
             if isbn is None:
+                if require_idle and state.chars and now - state.last_at > SCAN_MAX_SECONDS:
+                    state.reset()
                 return
-            # Only route when the field consists solely of the scanned ISBN.
-            # If staff had pre-existing content, leave it untouched (fail-open).
-            if clean_scan(value) != isbn:
-                return
-            self._pending = (focus, isbn)
-            self._emit_status(f"Scanner Mode: ISBN dikesan {isbn}.")
+            state.reset()
+            self._emit_status(f"Scanner Mode: ISBN dikesan {isbn}")
             self._on_scan(isbn)
 
 
 else:
 
-    class _WindowsScannerBackend:  # pragma: no cover - Windows-only implementation
+    class _WindowsScannerBackend:  # pragma: no cover
         def __init__(self, **_kwargs: object) -> None:
             pass
 
@@ -346,6 +481,3 @@ else:
 
         def stop(self) -> None:
             return None
-
-        def acknowledge(self, _isbn: str) -> bool:
-            return False

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.4 — Raw Input scanner observer
+
+- Replaced S-Lib textbox polling with Windows Raw Input HID observation.
+- Scanner input is no longer intercepted, redirected, cleared or rewritten.
+- S-Lib receives the ISBN normally while Assistant receives a parallel copy.
+- Detection is independent of S-Lib control IDs/focus mapping and therefore
+  does not depend on the legacy VB6 textbox exposing the expected automation ID.
+- A scan is routed only when S-Lib is foreground, timing is scanner-like and
+  ISBN-10/ISBN-13 checksum validation succeeds.
+- Added idle-finalization for scanners with no Enter/Tab suffix.
+
 ## 0.3.3 — Polling scanner monitor
 
 - Removed the low-level keyboard hook used by the 0.3.2 office pilot.

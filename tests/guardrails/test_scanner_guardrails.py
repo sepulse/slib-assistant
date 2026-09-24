@@ -18,9 +18,10 @@ def test_scanner_router_has_no_coordinate_or_keyboard_injection_path():
     assert all(token not in text for token in forbidden)
 
 
-def test_scanner_router_is_acknowledged_fail_open_polling():
+def test_scanner_router_uses_observational_raw_input_only():
     text = SCANNER.read_text(encoding="utf-8")
-    assert "def acknowledge" in text
-    assert "_poll_once" in text
-    assert "WM_SETTEXT" in text
+    assert "RegisterRawInputDevices" in text
+    assert "RIDEV_INPUTSINK" in text
+    assert "WM_INPUT" in text
     assert "fail-open" in text.casefold()
+    assert "WM_SETTEXT" not in text
