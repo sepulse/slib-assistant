@@ -1,5 +1,5 @@
-import ctypes
 import os
+import time
 
 import pytest
 
@@ -29,8 +29,8 @@ def test_appended_scan_must_match_exact_original_prefix():
     assert not appended_scan_matches("ABC9789836276965", "ABC", "9789836276964")
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows keyboard hook behavior")
-def test_windows_backend_suppresses_only_terminator_after_safe_restore(monkeypatch):
+@pytest.mark.skipif(os.name != "nt", reason="Windows control polling behavior")
+def test_windows_backend_routes_stable_valid_isbn_without_keyboard_hook(monkeypatch):
     routed: list[str] = []
     backend = scanner._WindowsScannerBackend(
         is_enabled=lambda: True,
@@ -38,49 +38,29 @@ def test_windows_backend_suppresses_only_terminator_after_safe_restore(monkeypat
         on_status=lambda _message: None,
     )
     monkeypatch.setattr(backend, "_focused_slib_isbn", lambda: 123)
-    monkeypatch.setattr(backend, "_restore_original", lambda *_args: True)
-    monkeypatch.setattr(scanner, "_window_text", lambda _hwnd: "")
+    monkeypatch.setattr(scanner, "_window_text", lambda _hwnd: "9789836276964")
+    backend._seen_focus = 123
+    backend._last_value = "9789836276964"
+    backend._stable_value = "9789836276964"
+    backend._stable_since = time.monotonic() - 1.0
 
-    def key(vk: int) -> int:
-        event = scanner.KBDLLHOOKSTRUCT(vkCode=vk)
-        return backend._keyboard_proc(
-            0,
-            scanner.WM_KEYDOWN,
-            ctypes.addressof(event),
-        )
+    backend._poll_once()
 
-    for digit in "9789836276964":
-        # Digits are fail-open and continue to S-Lib.
-        assert key(ord(digit)) == 0
-    # Only the scanner terminator is swallowed after safe restoration.
-    assert key(scanner.VK_RETURN) == 1
     assert routed == ["9789836276964"]
+    assert backend._pending == (123, "9789836276964")
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows keyboard hook behavior")
-def test_windows_backend_fail_open_when_restore_cannot_be_verified(monkeypatch):
-    routed: list[str] = []
+@pytest.mark.skipif(os.name != "nt", reason="Windows control polling behavior")
+def test_windows_backend_acknowledge_is_fail_open_if_field_changed(monkeypatch):
     statuses: list[str] = []
     backend = scanner._WindowsScannerBackend(
         is_enabled=lambda: True,
-        on_scan=routed.append,
+        on_scan=lambda _isbn: None,
         on_status=statuses.append,
     )
-    monkeypatch.setattr(backend, "_focused_slib_isbn", lambda: 123)
-    monkeypatch.setattr(backend, "_restore_original", lambda *_args: False)
-    monkeypatch.setattr(scanner, "_window_text", lambda _hwnd: "")
+    backend._pending = (123, "9789836276964")
+    monkeypatch.setattr(scanner.user32, "IsWindow", lambda _hwnd: 1)
+    monkeypatch.setattr(scanner, "_window_text", lambda _hwnd: "9789836276965")
 
-    def key(vk: int) -> int:
-        event = scanner.KBDLLHOOKSTRUCT(vkCode=vk)
-        return backend._keyboard_proc(
-            0,
-            scanner.WM_KEYDOWN,
-            ctypes.addressof(event),
-        )
-
-    for digit in "9789836276964":
-        assert key(ord(digit)) == 0
-    # Enter is also fail-open when the S-Lib field cannot be safely restored.
-    assert key(scanner.VK_RETURN) == 0
-    assert routed == []
+    assert backend.acknowledge("9789836276964") is False
     assert any("fail-open" in message for message in statuses)

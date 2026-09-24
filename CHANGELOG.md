@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.3 — Polling scanner monitor
+
+- Removed the low-level keyboard hook used by the 0.3.2 office pilot.
+- Scanner Mode now observes the confirmed S-Lib ISBN textbox (control ID 59)
+  instead of intercepting keystrokes.
+- Barcode input always goes to S-Lib first, so Scanner Mode cannot swallow it.
+- A valid ISBN is queued directly to S-Lib Assistant; only after the Assistant
+  acknowledges receipt is that exact ISBN cleared from the S-Lib textbox.
+- Added visible Scanner Mode status messages so office validation can confirm
+  whether the real ISBN/ISSN control has been detected before scanning.
+
 ## 0.3.2 — Office scanner routing pilot
 
 - Retired the separate coordinate-based Scanner Guard pilot.

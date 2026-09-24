@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import os
 import re
 import threading
@@ -98,32 +97,25 @@ class ScannerRouter:
         if backend is not None:
             backend.stop()
 
+    def acknowledge(self, isbn: str) -> bool:
+        """Confirm Assistant received an ISBN, then clear that exact value in S-Lib.
+
+        Until this acknowledgement succeeds, Scanner Mode leaves the barcode in
+        S-Lib. This makes routing fail-open instead of silently consuming input.
+        """
+        backend = self._backend
+        if backend is None:
+            return False
+        return backend.acknowledge(isbn)
+
 
 if os.name == "nt":
     import ctypes
     from ctypes import wintypes
 
-    WH_KEYBOARD_LL = 13
-    WM_KEYDOWN = 0x0100
-    WM_SYSKEYDOWN = 0x0104
-    WM_QUIT = 0x0012
     WM_SETTEXT = 0x000C
-    VK_RETURN = 0x0D
-    VK_TAB = 0x09
-    LLKHF_INJECTED = 0x10
     SMTO_ABORTIFHUNG = 0x0002
-
-    LRESULT = ctypes.c_ssize_t
     ULONG_PTR = wintypes.WPARAM
-
-    class KBDLLHOOKSTRUCT(ctypes.Structure):
-        _fields_ = [
-            ("vkCode", wintypes.DWORD),
-            ("scanCode", wintypes.DWORD),
-            ("flags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ULONG_PTR),
-        ]
 
     class GUITHREADINFO(ctypes.Structure):
         _fields_ = [
@@ -138,43 +130,7 @@ if os.name == "nt":
             ("rcCaret", wintypes.RECT),
         ]
 
-    HOOKPROC = ctypes.WINFUNCTYPE(
-        LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
-    )
-
     user32 = ctypes.WinDLL("user32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-    user32.SetWindowsHookExW.argtypes = [
-        ctypes.c_int,
-        HOOKPROC,
-        wintypes.HINSTANCE,
-        wintypes.DWORD,
-    ]
-    user32.SetWindowsHookExW.restype = wintypes.HHOOK
-    user32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
-    user32.UnhookWindowsHookEx.restype = wintypes.BOOL
-    user32.CallNextHookEx.argtypes = [
-        wintypes.HHOOK,
-        ctypes.c_int,
-        wintypes.WPARAM,
-        wintypes.LPARAM,
-    ]
-    user32.CallNextHookEx.restype = LRESULT
-    user32.GetMessageW.argtypes = [
-        ctypes.POINTER(wintypes.MSG),
-        wintypes.HWND,
-        wintypes.UINT,
-        wintypes.UINT,
-    ]
-    user32.GetMessageW.restype = wintypes.BOOL
-    user32.PostThreadMessageW.argtypes = [
-        wintypes.DWORD,
-        wintypes.UINT,
-        wintypes.WPARAM,
-        wintypes.LPARAM,
-    ]
-    user32.PostThreadMessageW.restype = wintypes.BOOL
     user32.GetForegroundWindow.restype = wintypes.HWND
     user32.GetWindowThreadProcessId.argtypes = [
         wintypes.HWND,
@@ -186,8 +142,6 @@ if os.name == "nt":
         ctypes.POINTER(GUITHREADINFO),
     ]
     user32.GetGUIThreadInfo.restype = wintypes.BOOL
-    user32.IsChild.argtypes = [wintypes.HWND, wintypes.HWND]
-    user32.IsChild.restype = wintypes.BOOL
     user32.GetDlgCtrlID.argtypes = [wintypes.HWND]
     user32.GetDlgCtrlID.restype = ctypes.c_int
     user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
@@ -196,6 +150,10 @@ if os.name == "nt":
     user32.GetWindowTextW.restype = ctypes.c_int
     user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetClassNameW.restype = ctypes.c_int
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsWindow.restype = wintypes.BOOL
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
     user32.SendMessageTimeoutW.argtypes = [
         wintypes.HWND,
         wintypes.UINT,
@@ -206,9 +164,6 @@ if os.name == "nt":
         ctypes.POINTER(ULONG_PTR),
     ]
     user32.SendMessageTimeoutW.restype = wintypes.LPARAM
-    kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
-    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
-    kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 
 
     def _window_text(hwnd: int) -> str:
@@ -224,19 +179,18 @@ if os.name == "nt":
         return buffer.value
 
 
-    def _candidate_char(vk: int) -> str | None:
-        if 0x30 <= vk <= 0x39:
-            return chr(ord("0") + vk - 0x30)
-        if 0x60 <= vk <= 0x69:
-            return chr(ord("0") + vk - 0x60)
-        if vk == 0x58:
-            return "X"
-        if vk in (0xBD, 0x6D):
-            return "-"
+    def _isbn_from_field(value: str) -> str | None:
+        candidate = clean_scan(value)
+        if len(candidate) == 10 and is_valid_isbn10(candidate):
+            return candidate
+        if len(candidate) == 13 and is_valid_isbn13(candidate):
+            return candidate
         return None
 
 
     class _WindowsScannerBackend:
+        """Poll the real S-Lib ISBN textbox; never intercept keyboard input."""
+
         def __init__(
             self,
             is_enabled: Callable[[], bool],
@@ -246,56 +200,79 @@ if os.name == "nt":
             self._is_enabled = is_enabled
             self._on_scan = on_scan
             self._on_status = on_status
-            self._hook: int | None = None
             self._thread: threading.Thread | None = None
-            self._thread_id: int | None = None
-            self._ready = threading.Event()
-            self._start_ok = False
-            self._hook_proc = HOOKPROC(self._keyboard_proc)
-            self._buffer: list[str] = []
-            self._focus: int | None = None
-            self._original = ""
-            self._started_at = 0.0
+            self._stop = threading.Event()
+            self._pending: tuple[int, str] | None = None
+            self._seen_focus: int | None = None
+            self._last_value = ""
+            self._stable_value = ""
+            self._stable_since = 0.0
+            self._last_status = ""
 
         def start(self) -> bool:
             self._thread = threading.Thread(
                 target=self._run,
-                name="SLibScannerRouter",
+                name="SLibScannerMonitor",
                 daemon=True,
             )
             self._thread.start()
-            if not self._ready.wait(timeout=2.0):
-                self._on_status("Scanner Mode gagal dimulakan (timeout).")
-                return False
-            return self._start_ok
+            self._emit_status(
+                "Scanner Mode aktif — menunggu medan ISBN/ISSN S-Lib."
+            )
+            return True
 
         def stop(self) -> None:
-            if self._thread_id is not None:
-                user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
+            self._stop.set()
             thread = self._thread
             if thread is not None and thread.is_alive():
                 thread.join(timeout=1.0)
 
-        def _run(self) -> None:
-            self._thread_id = int(kernel32.GetCurrentThreadId())
-            module = kernel32.GetModuleHandleW(None)
-            hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._hook_proc, module, 0)
-            if not hook:
-                error = ctypes.get_last_error()
-                self._on_status(f"Scanner Mode gagal memasang hook Windows ({error}).")
-                self._ready.set()
+        def acknowledge(self, isbn: str) -> bool:
+            pending = self._pending
+            if pending is None:
+                return False
+            hwnd, expected = pending
+            if expected != isbn or not user32.IsWindow(hwnd):
+                return False
+            current = _window_text(hwnd)
+            if clean_scan(current) != clean_scan(expected):
+                self._emit_status(
+                    "Scanner Mode fail-open: ISBN dikekalkan di S-Lib kerana "
+                    "nilai medan telah berubah sebelum pengesahan."
+                )
+                self._pending = None
+                return False
+            empty = ctypes.create_unicode_buffer("")
+            result = ULONG_PTR()
+            sent = user32.SendMessageTimeoutW(
+                hwnd,
+                WM_SETTEXT,
+                0,
+                ctypes.cast(empty, ctypes.c_void_p).value,
+                SMTO_ABORTIFHUNG,
+                300,
+                ctypes.byref(result),
+            )
+            if not sent or _window_text(hwnd) != "":
+                self._emit_status(
+                    "Scanner Mode fail-open: ISBN sudah diterima Assistant tetapi "
+                    "tidak dapat dibersihkan dari S-Lib."
+                )
+                self._pending = None
+                return False
+            self._pending = None
+            self._seen_focus = hwnd
+            self._last_value = ""
+            self._stable_value = ""
+            self._stable_since = time.monotonic()
+            self._emit_status("Scanner Mode: ISBN diterima oleh Assistant.")
+            return True
+
+        def _emit_status(self, message: str) -> None:
+            if message == self._last_status:
                 return
-            self._hook = int(hook)
-            self._start_ok = True
-            self._ready.set()
-            self._on_status("Scanner Mode aktif — scan ISBN pada medan ISBN/ISSN S-Lib.")
-            try:
-                message = wintypes.MSG()
-                while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
-                    pass
-            finally:
-                user32.UnhookWindowsHookEx(hook)
-                self._hook = None
+            self._last_status = message
+            self._on_status(message)
 
         def _focused_slib_isbn(self) -> int | None:
             top = user32.GetForegroundWindow()
@@ -311,9 +288,7 @@ if os.name == "nt":
             if not user32.GetGUIThreadInfo(thread_id, ctypes.byref(info)):
                 return None
             focus = info.hwndFocus
-            if not focus:
-                return None
-            if focus != top and not user32.IsChild(top, focus):
+            if not focus or not user32.IsWindowVisible(focus):
                 return None
             if user32.GetDlgCtrlID(focus) != SLIB_ISBN_CONTROL_ID:
                 return None
@@ -321,86 +296,43 @@ if os.name == "nt":
                 return None
             return int(focus)
 
-        def _reset(self) -> None:
-            self._buffer.clear()
-            self._focus = None
-            self._original = ""
-            self._started_at = 0.0
+        def _run(self) -> None:
+            while not self._stop.wait(0.03):
+                if not self._is_enabled() or self._pending is not None:
+                    continue
+                self._poll_once()
 
-        def _restore_original(self, focus: int, original: str, scanned: str) -> bool:
-            current = _window_text(focus)
-            if not appended_scan_matches(current, original, scanned):
-                return False
-            value = ctypes.create_unicode_buffer(original)
-            result = ULONG_PTR()
-            sent = user32.SendMessageTimeoutW(
-                focus,
-                WM_SETTEXT,
-                0,
-                ctypes.cast(value, ctypes.c_void_p).value,
-                SMTO_ABORTIFHUNG,
-                300,
-                ctypes.byref(result),
-            )
-            return bool(sent) and _window_text(focus) == original
-
-        def _keyboard_proc(self, n_code: int, w_param: int, l_param: int) -> int:
-            if n_code < 0 or w_param not in (WM_KEYDOWN, WM_SYSKEYDOWN):
-                return user32.CallNextHookEx(self._hook, n_code, w_param, l_param)
-            event = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-            if event.flags & LLKHF_INJECTED:
-                return user32.CallNextHookEx(self._hook, n_code, w_param, l_param)
-            if not self._is_enabled():
-                self._reset()
-                return user32.CallNextHookEx(self._hook, n_code, w_param, l_param)
-
+        def _poll_once(self) -> None:
             focus = self._focused_slib_isbn()
-            vk = int(event.vkCode)
-            char = _candidate_char(vk)
+            if focus is None:
+                return
+            if focus != self._seen_focus:
+                self._seen_focus = focus
+                self._last_value = _window_text(focus)
+                self._stable_value = self._last_value
+                self._stable_since = time.monotonic()
+                self._emit_status("Scanner Mode: medan ISBN/ISSN S-Lib dikesan.")
+                return
 
-            if char is not None and focus is not None:
-                now = time.monotonic()
-                if not self._buffer or self._focus != focus:
-                    self._reset()
-                    self._focus = focus
-                    self._original = _window_text(focus)
-                    self._started_at = now
-                self._buffer.append(char)
-                # Fail-open: the actual character is always delivered to S-Lib.
-                return user32.CallNextHookEx(self._hook, n_code, w_param, l_param)
+            value = _window_text(focus)
+            if value != self._last_value:
+                self._last_value = value
+                self._stable_value = value
+                self._stable_since = time.monotonic()
+                return
 
-            if vk in (VK_RETURN, VK_TAB) and self._buffer:
-                scanned = "".join(self._buffer)
-                duration = time.monotonic() - self._started_at
-                buffered_focus = self._focus
-                original = self._original
-                self._reset()
-                normalized = valid_scanned_isbn(scanned, duration)
-                if (
-                    normalized is not None
-                    and focus is not None
-                    and buffered_focus == focus
-                    and self._restore_original(focus, original, scanned)
-                ):
-                    try:
-                        self._on_scan(normalized)
-                    except Exception:
-                        logging.exception("Scanner callback failed")
-                    # Only now is the terminator suppressed. The barcode itself
-                    # was already accepted by S-Lib and safely rolled back.
-                    return 1
-                if normalized is not None:
-                    self._on_status(
-                        "Scanner Mode fail-open: ISBN dikekalkan di S-Lib kerana "
-                        "medan tidak dapat dipulihkan dengan pasti."
-                    )
-                # Any uncertainty is fail-open: keep the barcode in S-Lib and
-                # let Enter/Tab continue normally.
-                return user32.CallNextHookEx(self._hook, n_code, w_param, l_param)
-
-            if self._buffer:
-                self._reset()
-            return user32.CallNextHookEx(self._hook, n_code, w_param, l_param)
+            if not value or time.monotonic() - self._stable_since < 0.09:
+                return
+            isbn = _isbn_from_field(value)
+            if isbn is None:
+                return
+            # Only route when the field consists solely of the scanned ISBN.
+            # If staff had pre-existing content, leave it untouched (fail-open).
+            if clean_scan(value) != isbn:
+                return
+            self._pending = (focus, isbn)
+            self._emit_status(f"Scanner Mode: ISBN dikesan {isbn}.")
+            self._on_scan(isbn)
 
 
 else:
@@ -414,3 +346,6 @@ else:
 
         def stop(self) -> None:
             return None
+
+        def acknowledge(self, _isbn: str) -> bool:
+            return False

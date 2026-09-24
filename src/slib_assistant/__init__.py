@@ -3,4 +3,4 @@
 from .models import AppState, BookMetadata, Confidence, FieldConflict, ProviderRecord
 
 __all__ = ["AppState", "BookMetadata", "Confidence", "FieldConflict", "ProviderRecord"]
-__version__ = "0.3.2"
+__version__ = "0.3.3"

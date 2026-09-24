@@ -12,12 +12,15 @@ def test_scanner_router_has_no_coordinate_or_keyboard_injection_path():
         "mouse_event",
         "sendinput",
         "keybd_event",
+        "setwindowshookex",
+        "callnexthookex",
     )
     assert all(token not in text for token in forbidden)
 
 
-def test_scanner_router_is_fail_open_before_suppressing_terminator():
+def test_scanner_router_is_acknowledged_fail_open_polling():
     text = SCANNER.read_text(encoding="utf-8")
-    assert "Fail-open" in text
-    assert "_restore_original" in text
-    assert "return 1" in text
+    assert "def acknowledge" in text
+    assert "_poll_once" in text
+    assert "WM_SETTEXT" in text
+    assert "fail-open" in text.casefold()

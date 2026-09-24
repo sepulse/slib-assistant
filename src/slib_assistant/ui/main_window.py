@@ -229,8 +229,7 @@ class AssistantWindow:
 
     def _scanner_status(self, status: str) -> None:
         logging.info("Scanner: %s", status)
-        lowered = status.casefold()
-        if "gagal" in lowered or "fail-open" in lowered:
+        if self.state != AppState.LOOKING_UP:
             self.overall_status.set(status)
 
     def _toggle_scanner_mode(self) -> None:
@@ -254,7 +253,15 @@ class AssistantWindow:
         self.isbn_var.set(isbn)
         self.isbn_entry.icursor("end")
         self.isbn_entry.focus_set()
-        self.overall_status.set(f"ISBN scanner diterima: {isbn}")
+        acknowledged = False
+        if self.scanner_router is not None:
+            acknowledged = self.scanner_router.acknowledge(isbn)
+        if acknowledged:
+            self.overall_status.set(f"ISBN scanner diterima: {isbn}")
+        else:
+            self.overall_status.set(
+                "ISBN diterima Assistant; salinan dikekalkan di S-Lib (fail-open)."
+            )
         self.root.after(80, self.lookup)
 
     def show_about(self) -> None:
